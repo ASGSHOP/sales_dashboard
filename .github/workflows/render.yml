@@ -3,48 +3,34 @@ name: Deploy to Render
 on:
   push:
     branches:
-      - main  # Trigger on push to the main branch
-  pull_request:
-    branches:
-      - main  # Optional: Trigger on pull requests to the main branch
+      - main
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Check out the repository
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      # Set up Node.js (if your app uses Node.js)
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: 22  # Replace with your desired Node.js version
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22' # Adjust the Node.js version as per your project requirements
 
-      # Install dependencies (if your app uses npm)
-      - name: Install dependencies
-        run: npm install
+    - name: Install dependencies
+      run: npm install
 
-      # Build the application (if needed)
-      #- name: Build application
-       # run: npm run build
+    #- name: Build app
+      #run: npm run build # If your project requires building, e.g., if it uses TypeScript or has a build step
 
-      # Install Render CLI (fixed step)
-      - name: Install Render CLI
-        run: |
-          # Download the correct Render CLI binary for Linux
-          curl -L -o render.tar.gz https://github.com/renderinc/cli/releases/latest/download/render-linux-amd64.tar.gz
+    - name: Zip the app
+      run: |
+        zip -r app.zip . -x ".git/*" ".github/*"
 
-          # Extract the binary
-          tar -xzf render.tar.gz
-
-          # Make the binary executable
-          chmod +x render
-
-          # Add the binary to the PATH
-          echo "$(pwd)" >> $GITHUB_PATH
-
-          # Deploy using the Render CLI
-          render deploy --api-key ${{ secrets.RENDER_API_KEY }} --service srv-cuq71e1opnds73eilqpg
+    - name: Deploy to Render
+      uses: johnbeynon/render-deploy-action@v1.0.0
+      with:
+        api-key: ${{ secrets.RENDER_API_KEY }}
+        service-id: ${{ secrets.RENDER_SERVICE_ID }}
+        zip: app.zip
