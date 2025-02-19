@@ -28,8 +28,8 @@ jobs:
         run: npm install
 
       # Build the application (if needed)
-      - name: Build application
-        run: npm run build
+      #- name: Build application
+       # run: npm run build
 
       # Deploy to Render using the Render CLI
       - name: Deploy to Render
