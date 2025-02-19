@@ -31,20 +31,20 @@ jobs:
       #- name: Build application
        # run: npm run build
 
-          # Download and install the Render CLI
+      # Install Render CLI (fixed step)
       - name: Install Render CLI
         run: |
-          # Download the Render CLI binary
-          curl -o render-cli.zip -L https://github.com/renderinc/cli/releases/latest/download/render-cli-linux.zip
+          # Download the correct Render CLI binary for Linux
+          curl -L -o render.tar.gz https://github.com/renderinc/cli/releases/latest/download/render-linux-amd64.tar.gz
 
-          # Unzip the binary
-          unzip render-cli.zip -d render-cli
+          # Extract the binary
+          tar -xzf render.tar.gz
 
           # Make the binary executable
-          chmod +x render-cli/render
+          chmod +x render
 
           # Add the binary to the PATH
-          echo "$(pwd)/render-cli" >> $GITHUB_PATH
+          echo "$(pwd)" >> $GITHUB_PATH
 
           # Deploy using the Render CLI
           render deploy --api-key ${{ secrets.RENDER_API_KEY }} --service srv-cuq71e1opnds73eilqpg
