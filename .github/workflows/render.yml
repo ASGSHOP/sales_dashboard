@@ -3,35 +3,21 @@ name: Deploy to Render
 on:
   push:
     branches:
-      - main
+      - main  # Change to your deployment branch if needed
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '22' # Adjust based on your project's requirements
+      - name: Install dependencies
+        run: npm install
 
-    - name: Install dependencies
-      run: npm install
+      #- name: Build project (if applicable)
+        #run: npm run build
 
-    #- name: Build app
-     # run: npm run build # If your project requires building
-
-    - name: Zip the app
-      run: |
-        zip -r app.zip . -x ".git/*" ".github/*"
-
-    - name: Deploy to Render
-      run: |
-        curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
-        -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-        -H "Content-Type: application/zip" \
-        -H "Accept: application/json" \
-        -T app.zip
+      - name: Trigger Render Deployment
+        run: |
+          curl -X POST "https://api.render.com/deploy/srv-{YOUR_SERVICE_ID}?key=${{ secrets.RENDER_API_KEY }}"
