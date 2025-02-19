@@ -8,7 +8,8 @@ const MongoStore = require('connect-mongo');
 const mongoose = require('mongoose');
 const hpp = require('hpp');
 const apiRoutes = require('./routes/api/apiRoutes');
-
+const path = require('path')
+const appRoutes = require('./routes/app/appRoutes')
 // Load environment variables
 require('dotenv').config();
 
@@ -118,7 +119,10 @@ app.use(session({
     }
 }));
 
-
+//view file config
+//view engine and configuration
+app.set("views", path.join(__dirname, "views"));
+app.set("view engine", "ejs");
 
 // Simple route logging middleware
 app.use((req, res, next) => {
@@ -128,6 +132,8 @@ app.use((req, res, next) => {
 
 // Example protected route
 app.use('/api/v1', apiRoutes);
+//main routes
+app.use('/', appRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
