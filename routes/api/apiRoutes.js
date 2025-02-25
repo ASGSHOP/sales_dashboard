@@ -3,7 +3,9 @@ const router = express.Router()
 const User = require('../../models/User');
 const bcrypt = require('bcryptjs');
 const Transaction = require('../../models/Transaction'); // Adjust path as needed
-
+const { createObjectCsvStringifier } = require('csv-writer');
+const { pipeline, Transform } = require('stream');
+const mongoose = require('mongoose');
 /**
  * @route GET /api/transactions/filter
  * @desc Filter transactions by any field in query params
@@ -224,75 +226,94 @@ router.get('/filter', async (req, res) => {
 });
 
 
+// This API will stream data from MongoDB to CSV
+router.get('/export-csv', async (req, res) => {
+    try {
+        // Set headers for CSV download
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=transactions.csv');
 
-// router.post('/filter', async (req, res) => {
-//     try {
-//         // Get filter criteria and pagination from request body
-//         const { filter = {}, page = 1, limit = 10 } = req.body;
-//         const skip = (page - 1) * limit;
+        // Get the first document to determine headers
+        const sampleDoc = await Transaction.findOne({});
+        if (!sampleDoc) {
+            return res.status(404).send('No data found');
+        }
 
-//         // Process the filter to handle regex for string searches
-//         Object.keys(filter).forEach(key => {
-//             // Handle numeric fields
-//             if (['currency_amount', 'store_amount', 'discount_percentage', 'o2o'].includes(key) && !isNaN(filter[key])) {
-//                 filter[key] = Number(filter[key]);
-//             }
-//             // Handle boolean
-//             else if (key === 'Approval' && (filter[key] === true || filter[key] === false)) {
-//                 // No transformation needed for boolean
-//             }
-//             // Handle date range
-//             else if (key === 'tran_date' && filter[key].start && filter[key].end) {
-//                 filter[key] = {
-//                     $gte: filter[key].start,
-//                     $lte: filter[key].end
-//                 };
-//             }
-//             // Handle string fields with partial matching
-//             else if (typeof filter[key] === 'string') {
-//                 filter[key] = { $regex: filter[key], $options: 'i' };
-//             }
-//         });
+        // Create headers from the document schema
+        const headers = Object.keys(sampleDoc.toObject()).map(key => {
+            return { id: key, title: key };
+        });
 
-//         // Execute query with pagination
-//         const transactions = await Transaction.find(filter)
-//             .skip(skip)
-//             .limit(limit)
-//             .sort({ tran_date: -1 });
+        // Create CSV stringifier
+        const csvStringifier = createObjectCsvStringifier({
+            header: headers
+        });
 
-//         // Get total count of matching documents
-//         const totalCount = await Transaction.countDocuments(filter);
+        // Write headers to response
+        res.write(csvStringifier.getHeaderString());
 
-//         // Calculate total amount
-//         const totalAmountResult = await Transaction.aggregate([
-//             { $match: filter },
-//             {
-//                 $group: {
-//                     _id: null,
-//                     totalAmount: { $sum: '$store_amount' },
-//                     totalCurrencyAmount: { $sum: '$currency_amount' }
-//                 }
-//             }
-//         ]);
+        // Batch size for pagination
+        const batchSize = 1000;
+        let lastId = null;
+        let hasMoreData = true;
 
-//         const totalAmount = totalAmountResult.length > 0 ? totalAmountResult[0].totalAmount : 0;
-//         const totalCurrencyAmount = totalAmountResult.length > 0 ? totalAmountResult[0].totalCurrencyAmount : 0;
+        // Process data in batches using pagination with _id
+        while (hasMoreData) {
+            // Create query for pagination (using _id for efficient pagination)
+            const query = lastId ? { _id: { $gt: lastId } } : {};
 
-//         res.json({
-//             success: true,
-//             totalCount,
-//             totalAmount,
-//             totalCurrencyAmount,
-//             currentPage: page,
-//             totalPages: Math.ceil(totalCount / limit),
-//             transactions
-//         });
+            // Get batch of documents
+            const batch = await Transaction.find(query)
+                .sort({ _id: 1 })
+                .limit(batchSize)
+                .lean();
 
-//     } catch (err) {
-//         console.error('Error filtering transactions:', err);
-//         res.status(500).json({ success: false, message: 'Server error', error: err.message });
-//     }
-// });
+            // If batch is empty, we've processed all documents
+            if (batch.length === 0) {
+                hasMoreData = false;
+                continue;
+            }
+
+            // Update lastId for next iteration
+            lastId = batch[batch.length - 1]._id;
+
+            // Convert special MongoDB types (like ObjectId) to strings
+            const processedBatch = batch.map(doc => {
+                const processedDoc = {};
+
+                // Process each field
+                for (const [key, value] of Object.entries(doc)) {
+                    if (value instanceof mongoose.Types.ObjectId) {
+                        processedDoc[key] = value.toString();
+                    } else if (value instanceof Date) {
+                        processedDoc[key] = value.toISOString();
+                    } else if (typeof value === 'object' && value !== null) {
+                        processedDoc[key] = JSON.stringify(value);
+                    } else {
+                        processedDoc[key] = value;
+                    }
+                }
+
+                return processedDoc;
+            });
+
+            // Write batch to CSV and stream to response
+            res.write(csvStringifier.stringifyRecords(processedBatch));
+        }
+
+        // End response stream
+        res.end();
+    } catch (error) {
+        console.error('Export error:', error);
+        // If headers are already sent, we can't send an error status
+        if (!res.headersSent) {
+            res.status(500).send(`Export failed: ${error.message}`);
+        } else {
+            res.end(`\nExport failed: ${error.message}`);
+        }
+    }
+});
+
 
 
 module.exports = router;
