@@ -88,7 +88,7 @@ router.post('/create-user', async (req, res) => {
             email,
             phone,
             company,
-            generatedPass: pass,
+
             password: hashedPassword,
             role: role || 'user', // Use provided role or default to 'user'
         });
@@ -101,6 +101,7 @@ router.post('/create-user', async (req, res) => {
             name: newUser.name,
             email: newUser.email,
             phone: newUser.phone,
+            generatedPass: pass,
             company: newUser.company,
             role: newUser.role, // Include role in the response
         };
