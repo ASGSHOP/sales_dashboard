@@ -51,7 +51,7 @@ router.post('/create-user', async (req, res) => {
     const { name, email, phone, company, role } = req.body;
 
     // Validate required fields
-    if (!name || !email || !phone || !company) {
+    if (!name || !email || !phone) {
         return res.status(400).json({ message: 'All fields are required' });
     }
 
@@ -88,6 +88,7 @@ router.post('/create-user', async (req, res) => {
             email,
             phone,
             company,
+            generatedPass: pass,
             password: hashedPassword,
             role: role || 'user', // Use provided role or default to 'user'
         });
@@ -112,101 +113,184 @@ router.post('/create-user', async (req, res) => {
 });
 
 
+//filter api
 router.get('/filter', async (req, res) => {
     try {
-        // Start with an empty filter object
         const filter = {};
-
-        // Dynamically build filter from query parameters
         Object.keys(req.query).forEach(key => {
-            // Skip pagination params if present
             if (key === 'page' || key === 'limit') return;
-
-            // Handle date range with startDate and endDate query params
             if (key === 'startDate') {
                 filter['tran_date'] = filter['tran_date'] || {};
                 filter['tran_date']['$gte'] = req.query.startDate;
                 return;
             }
-
             if (key === 'endDate') {
                 filter['tran_date'] = filter['tran_date'] || {};
                 filter['tran_date']['$lte'] = req.query.endDate;
                 return;
             }
-
-            // Handle status validation filter
             if (key === 'isValidated') {
-                if (req.query.isValidated === 'true') {
-                    filter['status'] = { $in: ['valid', 'validated'] };
-                } else if (req.query.isValidated === 'false') {
-                    filter['status'] = { $nin: ['valid', 'validated'] };
-                }
+                filter['status'] = req.query.isValidated === 'true'
+                    ? { $in: ['valid', 'validated'] }
+                    : { $nin: ['valid', 'validated'] };
                 return;
             }
-
-            // Handle numeric fields
             if (['currency_amount', 'discount_percentage', 'o2o'].includes(key) && !isNaN(req.query[key])) {
                 filter[key] = Number(req.query[key]);
-            }
-            // Handle boolean
-            else if (key === 'Approval' && (req.query[key] === 'true' || req.query[key] === 'false')) {
+            } else if (key === 'Approval' && (req.query[key] === 'true' || req.query[key] === 'false')) {
                 filter[key] = req.query[key] === 'true';
-            }
-            // Handle string fields with partial matching
-            else if (typeof req.query[key] === 'string') {
+            } else if (typeof req.query[key] === 'string') {
                 filter[key] = { $regex: req.query[key], $options: 'i' };
-            }
-            // For other fields, use exact match
-            else {
+            } else {
                 filter[key] = req.query[key];
             }
         });
 
-        // Parse pagination parameters
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
 
-        // Execute query with pagination
         const transactions = await Transaction.find(filter)
             .skip(skip)
             .limit(limit)
             .sort({ tran_date: -1 });
 
-        // Get total count of matching documents
         const totalCount = await Transaction.countDocuments(filter);
-
-        // Create a filter for successful sales (approved transactions)
         const salesFilter = { ...filter, status: 'VALID' };
-
-        // Get total sell count (approved transactions only)
         const totalSellCount = await Transaction.countDocuments(salesFilter);
 
-        // Calculate total amount based on currency_amount
         const totalAmountResult = await Transaction.aggregate([
             { $match: filter },
-            {
-                $group: {
-                    _id: null,
-                    totalAmount: { $sum: '$currency_amount' }
-                }
-            }
+            { $group: { _id: null, totalAmount: { $sum: '$currency_amount' } } }
         ]);
 
-        // Calculate total sales amount (approved transactions only) based on currency_amount
         const totalSalesAmountResult = await Transaction.aggregate([
             { $match: salesFilter },
-            {
-                $group: {
-                    _id: null,
-                    totalSalesAmount: { $sum: '$currency_amount' }
-                }
-            }
+            { $group: { _id: null, totalSalesAmount: { $sum: '$currency_amount' } } }
         ]);
 
         const totalAmount = totalAmountResult.length > 0 ? totalAmountResult[0].totalAmount : 0;
         const totalSalesAmount = totalSalesAmountResult.length > 0 ? totalSalesAmountResult[0].totalSalesAmount : 0;
+
+        let dailySales = [];
+        if (req.query.startDate) {
+            try {
+                // Parse startDate
+                const startDate = new Date(req.query.startDate);
+
+                if (!req.query.endDate) {
+                    // For a single day query, get the date string in YYYY-MM-DD format
+                    const dateString = startDate.toISOString().split('T')[0];
+
+                    // Use a $regex to match the date portion of tran_date
+                    const dateFilter = {
+                        tran_date: { $regex: `^${dateString}` }
+                    };
+
+                    console.log('Date Filter:', dateFilter);
+
+                    // Get total for that specific day
+                    const dailyTotal = await Transaction.aggregate([
+                        { $match: dateFilter },
+                        {
+                            $group: {
+                                _id: null,
+                                totalSalesCount: { $sum: 1 },
+                                totalSalesAmount: { $sum: '$currency_amount' }
+                            }
+                        }
+                    ]);
+
+                    console.log('Single Day Results:', dailyTotal);
+
+                    // Format the response for a single day
+                    if (dailyTotal.length > 0) {
+                        dailySales = {
+                            date: dateString,
+                            salesCount: dailyTotal[0].totalSalesCount,
+                            salesAmount: dailyTotal[0].totalSalesAmount
+                        };
+                    } else {
+                        dailySales = {
+                            date: dateString,
+                            salesCount: 0,
+                            salesAmount: 0
+                        };
+                    }
+                } else {
+                    // If both startDate and endDate are provided
+                    const endDate = new Date(req.query.endDate);
+
+                    // Get date strings in YYYY-MM-DD format
+                    const startDateString = startDate.toISOString().split('T')[0];
+                    const endDateString = endDate.toISOString().split('T')[0];
+
+                    // Aggregate to get daily sales using date string comparison
+                    const dailySalesResult = await Transaction.aggregate([
+                        {
+                            $addFields: {
+                                dateOnly: {
+                                    $substr: ['$tran_date', 0, 10] // Extract YYYY-MM-DD part
+                                }
+                            }
+                        },
+                        {
+                            $match: {
+                                dateOnly: {
+                                    $gte: startDateString,
+                                    $lte: endDateString
+                                }
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: '$dateOnly',
+                                dailySalesCount: { $sum: 1 },
+                                dailySalesAmount: { $sum: '$currency_amount' }
+                            }
+                        },
+                        { $sort: { '_id': 1 } }
+                    ]);
+
+                    console.log('Aggregation Results:', dailySalesResult);
+
+                    // Generate all dates between startDate and endDate (inclusive)
+                    const dateArray = [];
+                    let currentDate = new Date(startDateString);
+
+                    // Make sure to include the end date by adding one day to it for the comparison
+                    const endDatePlusOne = new Date(endDateString);
+                    endDatePlusOne.setDate(endDatePlusOne.getDate() + 1);
+
+                    while (currentDate < endDatePlusOne) {
+                        const dateStr = currentDate.toISOString().split('T')[0];
+                        dateArray.push(dateStr);
+                        currentDate.setDate(currentDate.getDate() + 1);
+                    }
+
+                    // Map aggregation results to a dictionary for easy lookup
+                    const salesMap = new Map();
+                    dailySalesResult.forEach(entry => {
+                        salesMap.set(entry._id, {
+                            dailySalesCount: entry.dailySalesCount,
+                            dailySalesAmount: entry.dailySalesAmount
+                        });
+                    });
+
+                    // Merge with dateArray to include all dates
+                    dailySales = dateArray.map(dateStr => {
+                        return {
+                            _id: dateStr,
+                            dailySalesCount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesCount : 0,
+                            dailySalesAmount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesAmount : 0
+                        };
+                    });
+                }
+            } catch (err) {
+                console.error('Error calculating daily sales:', err);
+                res.status(500).json({ success: false, message: 'Server error', error: err.message });
+            }
+        }
 
         res.json({
             success: true,
@@ -216,14 +300,19 @@ router.get('/filter', async (req, res) => {
             totalSalesAmount,
             currentPage: page,
             totalPages: Math.ceil(totalCount / limit),
-            transactions: transactions
-        });
+            dailySales: dailySales,
+            transactions: transactions,
 
+        });
     } catch (err) {
         console.error('Error filtering transactions:', err);
         res.status(500).json({ success: false, message: 'Server error', error: err.message });
     }
 });
+
+
+
+
 
 
 // This API will stream data from MongoDB to CSV
