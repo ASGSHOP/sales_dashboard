@@ -221,70 +221,148 @@ router.get('/filter', async (req, res) => {
                     // If both startDate and endDate are provided
                     const endDate = new Date(req.query.endDate);
 
+                    // Calculate the date difference in days
+                    const dateDifference = Math.floor((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
                     // Get date strings in YYYY-MM-DD format
                     const startDateString = startDate.toISOString().split('T')[0];
                     const endDateString = endDate.toISOString().split('T')[0];
 
-                    // Aggregate to get daily sales using date string comparison
-                    const dailySalesResult = await Transaction.aggregate([
-                        {
-                            $addFields: {
-                                dateOnly: {
-                                    $substr: ['$tran_date', 0, 10] // Extract YYYY-MM-DD part
+                    // Check if the date range is 366 days or more
+                    if (dateDifference >= 366) {
+                        // Group by month for large date ranges
+                        const monthlySalesResult = await Transaction.aggregate([
+                            {
+                                $addFields: {
+                                    dateOnly: {
+                                        $substr: ['$tran_date', 0, 10] // Extract YYYY-MM-DD part
+                                    }
                                 }
-                            }
-                        },
-                        {
-                            $match: {
-                                dateOnly: {
-                                    $gte: startDateString,
-                                    $lte: endDateString
+                            },
+                            {
+                                $match: {
+                                    dateOnly: {
+                                        $gte: startDateString,
+                                        $lte: endDateString
+                                    }
                                 }
-                            }
-                        },
-                        {
-                            $group: {
-                                _id: '$dateOnly',
-                                dailySalesCount: { $sum: 1 },
-                                dailySalesAmount: { $sum: '$currency_amount' }
-                            }
-                        },
-                        { $sort: { '_id': 1 } }
-                    ]);
+                            },
+                            {
+                                $addFields: {
+                                    yearMonth: {
+                                        $substr: ['$dateOnly', 0, 7] // Extract YYYY-MM part
+                                    }
+                                }
+                            },
+                            {
+                                $group: {
+                                    _id: '$yearMonth',
+                                    monthlySalesCount: { $sum: 1 },
+                                    monthlySalesAmount: { $sum: '$currency_amount' }
+                                }
+                            },
+                            { $sort: { '_id': 1 } }
+                        ]);
 
-                    console.log('Aggregation Results:', dailySalesResult);
+                        console.log('Monthly Aggregation Results:', monthlySalesResult);
 
-                    // Generate all dates between startDate and endDate (inclusive)
-                    const dateArray = [];
-                    let currentDate = new Date(startDateString);
+                        // Generate all months between startDate and endDate (inclusive)
+                        const monthArray = [];
+                        let currentMonth = new Date(startDateString);
 
-                    // Make sure to include the end date by adding one day to it for the comparison
-                    const endDatePlusOne = new Date(endDateString);
-                    endDatePlusOne.setDate(endDatePlusOne.getDate() + 1);
+                        // Add one month to the end date for proper comparison
+                        const endMonthPlusOne = new Date(endDateString);
+                        endMonthPlusOne.setMonth(endMonthPlusOne.getMonth() + 1);
 
-                    while (currentDate < endDatePlusOne) {
-                        const dateStr = currentDate.toISOString().split('T')[0];
-                        dateArray.push(dateStr);
-                        currentDate.setDate(currentDate.getDate() + 1);
-                    }
+                        while (currentMonth < endMonthPlusOne) {
+                            const yearMonth = currentMonth.toISOString().substring(0, 7); // YYYY-MM format
+                            monthArray.push(yearMonth);
 
-                    // Map aggregation results to a dictionary for easy lookup
-                    const salesMap = new Map();
-                    dailySalesResult.forEach(entry => {
-                        salesMap.set(entry._id, {
-                            dailySalesCount: entry.dailySalesCount,
-                            dailySalesAmount: entry.dailySalesAmount
+                            // Move to the next month
+                            currentMonth.setMonth(currentMonth.getMonth() + 1);
+                        }
+
+                        // Map aggregation results to a dictionary for easy lookup
+                        const salesMap = new Map();
+                        monthlySalesResult.forEach(entry => {
+                            salesMap.set(entry._id, {
+                                monthlySalesCount: entry.monthlySalesCount,
+                                monthlySalesAmount: entry.monthlySalesAmount
+                            });
                         });
-                    });
 
-                    // Merge with dateArray to include all dates
-                    dailySales = dateArray.map(dateStr => {
-                        return {
-                            _id: dateStr,
-                            dailySalesCount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesCount : 0,
-                            dailySalesAmount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesAmount : 0
-                        };
-                    });
+                        // Merge with monthArray to include all months
+                        dailySales = monthArray.map(monthStr => {
+                            return {
+                                _id: monthStr,
+                                salesCount: salesMap.has(monthStr) ? salesMap.get(monthStr).monthlySalesCount : 0,
+                                salesAmount: salesMap.has(monthStr) ? salesMap.get(monthStr).monthlySalesAmount : 0,
+                                periodType: 'month'
+                            };
+                        });
+                    } else {
+                        // Regular daily aggregation for smaller date ranges
+                        const dailySalesResult = await Transaction.aggregate([
+                            {
+                                $addFields: {
+                                    dateOnly: {
+                                        $substr: ['$tran_date', 0, 10] // Extract YYYY-MM-DD part
+                                    }
+                                }
+                            },
+                            {
+                                $match: {
+                                    dateOnly: {
+                                        $gte: startDateString,
+                                        $lte: endDateString
+                                    }
+                                }
+                            },
+                            {
+                                $group: {
+                                    _id: '$dateOnly',
+                                    dailySalesCount: { $sum: 1 },
+                                    dailySalesAmount: { $sum: '$currency_amount' }
+                                }
+                            },
+                            { $sort: { '_id': 1 } }
+                        ]);
+
+                        console.log('Daily Aggregation Results:', dailySalesResult);
+
+                        // Generate all dates between startDate and endDate (inclusive)
+                        const dateArray = [];
+                        let currentDate = new Date(startDateString);
+
+                        // Make sure to include the end date by adding one day to it for the comparison
+                        const endDatePlusOne = new Date(endDateString);
+                        endDatePlusOne.setDate(endDatePlusOne.getDate() + 1);
+
+                        while (currentDate < endDatePlusOne) {
+                            const dateStr = currentDate.toISOString().split('T')[0];
+                            dateArray.push(dateStr);
+                            currentDate.setDate(currentDate.getDate() + 1);
+                        }
+
+                        // Map aggregation results to a dictionary for easy lookup
+                        const salesMap = new Map();
+                        dailySalesResult.forEach(entry => {
+                            salesMap.set(entry._id, {
+                                dailySalesCount: entry.dailySalesCount,
+                                dailySalesAmount: entry.dailySalesAmount
+                            });
+                        });
+
+                        // Merge with dateArray to include all dates
+                        dailySales = dateArray.map(dateStr => {
+                            return {
+                                _id: dateStr,
+                                salesCount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesCount : 0,
+                                salesAmount: salesMap.has(dateStr) ? salesMap.get(dateStr).dailySalesAmount : 0,
+                                periodType: 'day'
+                            };
+                        });
+                    }
                 }
             } catch (err) {
                 console.error('Error calculating daily sales:', err);
