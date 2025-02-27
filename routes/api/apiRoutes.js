@@ -238,100 +238,292 @@ router.get('/filter', async (req, res) => {
 });
 
 // Add a dedicated endpoint just for sales statistics
-router.get('/sales-stats', async (req, res) => {
+router.get('/sales/stats', async (req, res) => {
     try {
-        // Build date query
-        let dateQuery = {};
+        const { date, startDate, endDate, ...queryFilters } = req.query;
 
-        if (req.query.startDate && req.query.endDate) {
-            // Convert dates to ISO format for consistent comparison
-            const startDate = new Date(req.query.startDate);
-            const endDate = new Date(req.query.endDate);
-            endDate.setHours(23, 59, 59, 999); // Set to end of day
+        // Validate date parameters
+        if (date && (startDate || endDate)) {
+            return res.status(400).json({ error: "Provide either single date or date range, not both" });
+        }
 
-            dateQuery = {
-                Timestamp: {
-                    $gte: startDate.toISOString().split('T')[0],
-                    $lte: endDate.toISOString().split('T')[0]
-                }
-            };
-        } else if (req.query.startDate) {
-            // If only startDate is provided, filter for that specific date
-            const startDate = new Date(req.query.startDate);
-            dateQuery = {
-                Timestamp: startDate.toISOString().split('T')[0]
+        if (!date && (!startDate || !endDate)) {
+            return res.status(400).json({ error: "Must provide either a date or both start and end dates" });
+        }
+
+        // Build date filter for tran_date
+        const dateFilter = {};
+        if (date) {
+            dateFilter.tran_date = { $regex: new RegExp(`^${date}`) };
+        } else {
+            dateFilter.tran_date = {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate + 'T23:59:59.999Z')
             };
         }
 
-        // Add status filter for valid transactions
-        const query = { ...dateQuery, status: "VALID" };
+        // Convert query parameters to MongoDB filters
+        const filters = {};
+        for (const [key, value] of Object.entries(queryFilters)) {
+            if (value === 'true') filters[key] = true;
+            else if (value === 'false') filters[key] = false;
+            else if (!isNaN(value)) filters[key] = parseFloat(value);
+            else filters[key] = value;
+        }
 
-        // Get overall sales statistics
-        const overallStats = await Transaction.aggregate([
-            { $match: query },
+        // Aggregation pipeline
+        const pipeline = [
+            { $match: { ...filters, ...dateFilter } },
             {
-                $group: {
-                    _id: null,
-                    totalSalesCount: { $sum: 1 },
-                    totalSalesAmount: { $sum: "$currency_amount" } // Using currency_amount instead of store_amount
+                $addFields: {
+                    saleDate: {
+                        $dateToString: {
+                            format: "%Y-%m-%d",
+                            date: { $toDate: "$tran_date" }
+                        }
+                    }
+                }
+            },
+            {
+                $facet: {
+                    dailyStats: [
+                        {
+                            $group: {
+                                _id: "$saleDate",
+                                count: { $sum: 1 },
+                                totalAmount: { $sum: "$currency_amount" }
+                            }
+                        },
+                        { $sort: { _id: 1 } }
+                    ],
+                    totalStats: [
+                        {
+                            $group: {
+                                _id: null,
+                                totalCount: { $sum: 1 },
+                                totalAmount: { $sum: "$currency_amount" }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $project: {
+                    dailyStats: 1,
+                    totalStats: {
+                        $ifNull: [
+                            { $arrayElemAt: ["$totalStats", 0] },
+                            { totalCount: 0, totalAmount: 0 }
+                        ]
+                    }
                 }
             }
-        ]).exec();
+        ];
 
-        // Get daily breakdown of sales
-        const dailyStats = await Transaction.aggregate([
-            { $match: query },
-            {
-                $group: {
-                    _id: "$Timestamp",
-                    salesCount: { $sum: 1 },
-                    salesAmount: { $sum: "$currency_amount" } // Using currency_amount instead of store_amount
-                }
-            },
-            { $sort: { _id: 1 } } // Sort by date ascending
-        ]).exec();
+        const result = await Transaction.aggregate(pipeline);
+        const stats = result[0] || { dailyStats: [], totalStats: { totalCount: 0, totalAmount: 0 } };
 
-        // Get date information for the response
-        let dateInfo = {};
-        if (req.query.startDate && req.query.endDate) {
-            dateInfo = {
-                dateRange: true,
-                startDate: req.query.startDate,
-                endDate: req.query.endDate
-            };
-        } else if (req.query.startDate) {
-            dateInfo = {
-                dateRange: false,
-                date: req.query.startDate
-            };
-        }
-
-        return res.status(200).json({
-            success: true,
-            dateInfo,
-            overallStats: overallStats.length > 0 ? {
-                totalSalesCount: overallStats[0].totalSalesCount,
-                totalSalesAmount: overallStats[0].totalSalesAmount
-            } : {
-                totalSalesCount: 0,
-                totalSalesAmount: 0
-            },
-            dailyStats: dailyStats.map(day => ({
+        // Format response
+        const response = {
+            dailyStats: stats.dailyStats.map(day => ({
                 date: day._id,
-                salesCount: day.salesCount,
-                salesAmount: day.salesAmount
-            }))
-        });
+                count: day.count,
+                totalAmount: day.totalAmount
+            })),
+            totalCount: stats.totalStats.totalCount,
+            totalAmount: stats.totalStats.totalAmount
+        };
+
+        res.json(response);
 
     } catch (error) {
-        console.error('Error getting sales stats:', error);
-        return res.status(500).json({
+        console.error("Error fetching sales stats:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Utility function to parse dates and convert to consistent format
+function parseDate(dateString) {
+    // Check if dateString is already in YYYY-MM-DD format
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+        return dateString;
+    }
+
+    // Create a date object and format it as YYYY-MM-DD
+    const date = new Date(dateString);
+    return date.toISOString().split('T')[0];
+}
+
+
+router.get('/sales', async (req, res) => {
+    try {
+        // Extract pagination parameters
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        // Extract date filters
+        const { startDate, endDate } = req.query;
+
+        // Build the query
+        const query = {};
+
+        // Handle date filtering
+        if (startDate) {
+            const formattedStartDate = parseDate(startDate);
+
+            if (endDate) {
+                // Date range query
+                const formattedEndDate = parseDate(endDate);
+                query.Timestamp = {
+                    $gte: formattedStartDate,
+                    $lte: formattedEndDate
+                };
+            } else {
+                // Single date query
+                query.Timestamp = formattedStartDate;
+            }
+        }
+
+        // Handle other filter parameters (dynamically)
+        Object.keys(req.query).forEach(key => {
+            // Skip pagination and date range parameters
+            if (['page', 'limit', 'startDate', 'endDate', 'sort', 'sortOrder'].includes(key)) {
+                return;
+            }
+
+            // Handle nested properties (using dot notation)
+            if (key.includes('.')) {
+                const value = req.query[key];
+                query[key] = value;
+                return;
+            }
+
+            // Handle regular properties
+            if (req.query[key]) {
+                // Try to parse as JSON for complex filters
+                try {
+                    query[key] = JSON.parse(req.query[key]);
+                } catch (e) {
+                    // If not valid JSON, use as is
+                    query[key] = req.query[key];
+                }
+            }
+        });
+
+        // Sort parameters
+        const sortField = req.query.sort || 'Timestamp';
+        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+        const sortOptions = { [sortField]: sortOrder };
+
+        // Execute main query with pagination
+        const sales = await Transaction.find(query)
+            .sort(sortOptions)
+            .skip(skip)
+            .limit(limit);
+
+        // Get total count for pagination and summary
+        const totalRecords = await Transaction.countDocuments(query);
+
+        // Calculate total sales amount based on currency_amount (excluding store_amount)
+        const totalSalesAmount = sales.reduce((sum, record) => {
+            return sum + (record.currency_amount || 0);
+        }, 0);
+
+        // Get the total sale count for all matching records (not just the current page)
+        const totalSaleCount = await Transaction.countDocuments({
+            ...query,
+            status: "VALID" // Only count valid sales
+        });
+
+        // Aggregate sales data by day
+        let dailyMetrics = [];
+
+        if (startDate) {
+            // Prepare date query for aggregation
+            const dateQuery = {};
+            if (startDate) {
+                dateQuery.$gte = parseDate(startDate);
+                if (endDate) {
+                    dateQuery.$lte = parseDate(endDate);
+                }
+            }
+
+            // MongoDB aggregation for daily metrics
+            dailyMetrics = await Transaction.aggregate([
+                {
+                    $match: {
+                        ...query,
+                        // Make sure we're filtering by date correctly
+                        Timestamp: dateQuery
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            // Group by date part of Timestamp
+                            date: { $substr: ["$Timestamp", 0, 10] }
+                        },
+                        count: { $sum: 1 },
+                        validSaleCount: {
+                            $sum: {
+                                $cond: [{ $eq: ["$status", "VALID"] }, 1, 0]
+                            }
+                        },
+                        totalAmount: { $sum: "$currency_amount" },
+                        transactions: {
+                            $push: {
+                                tran_id: "$tran_id",
+                                amount: "$currency_amount",
+                                product: "$ProductName",
+                                customer: "$Name",
+                                timestamp: "$Timestamp",
+                                status: "$status"
+                            }
+                        }
+                    }
+                },
+                { $sort: { "_id.date": 1 } }
+            ]);
+        }
+
+        // Prepare response
+        const response = {
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(totalRecords / limit),
+                totalRecords,
+                recordsPerPage: limit
+            },
+            summary: {
+                totalSalesAmount,
+                totalSaleCount, // Total number of valid sales
+                recordCount: sales.length, // Records on current page
+                currency: "BDT" // Assuming BDT is the currency
+            },
+            dailyMetrics: dailyMetrics.map(day => ({
+                date: day._id.date,
+                transactionCount: day.count, // Total transactions
+                saleCount: day.validSaleCount, // Valid sales only
+                totalAmount: day.totalAmount,
+                //transactions: day.transactions.slice(0, 5) // Limit to first 5 transactions to keep response size manageable
+            })),
+            records: sales
+        };
+
+        res.status(200).json(response);
+    } catch (error) {
+        console.error('Error fetching sales data:', error);
+        res.status(500).json({
             success: false,
-            error: 'Server Error',
-            message: error.message
+            message: 'Error fetching sales data',
+            error: error.message
         });
     }
 });
+
+
+
 
 
 // Get combined top products data (both by amount and count)
