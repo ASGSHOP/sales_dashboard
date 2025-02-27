@@ -16,20 +16,26 @@ const mongoose = require('mongoose');
 router.post('/auth', async (req, res) => {
     const { phone, password } = req.body;
 
+    console.log(req.body);
+
     if (!phone || !password) {
         return res.status(400).json({ message: 'Phone and password are required' });
     }
 
     try {
         // Find user by phone
-        const user = await User.findOne({ phone });
+        const user = await User.findOne({ phone }).select('+password');
+        const hashPass = user.password;
+        // console.log(hashPass)
+        //  console.log(password)
 
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
         // Compare passwords
-        const isPasswordValid = await bcrypt.compare(password, user.password);
+        const isPasswordValid = await bcrypt.compare(password, hashPass);
+        // console.log(isPasswordValid)
 
         if (!isPasswordValid) {
             return res.status(401).json({ message: 'Invalid password' });
@@ -48,10 +54,11 @@ router.post('/auth', async (req, res) => {
 
 
 router.post('/create-user', async (req, res) => {
-    const { name, email, phone, company, role } = req.body;
+    const { name, email, phone, company, password, role } = req.body;
 
+    // console.log(password);
     // Validate required fields
-    if (!name || !email || !phone) {
+    if (!name || !email || !phone || !password) {
         return res.status(400).json({ message: 'All fields are required' });
     }
 
@@ -63,24 +70,14 @@ router.post('/create-user', async (req, res) => {
             return res.status(400).json({ message: 'User with this email or phone already exists' });
         }
 
-        // Function to generate a random string
-        function generateRandomString(length = 5) {
-            const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-            let result = '';
 
-            for (let i = 0; i < length; i++) {
-                const randomIndex = Math.floor(Math.random() * characters.length);
-                result += characters[randomIndex];
-            }
 
-            return result;
-        }
 
-        // Generate a random password
-        const pass = generateRandomString();
 
         // Hash the generated password
-        const hashedPassword = await bcrypt.hash(pass, 10); // 10 is the salt rounds
+        //const hashedPassword = await bcrypt.hash(password, 10); // 10 is the salt rounds
+
+        // console.log("hash", hashedPassword);
 
         // Create a new user with the hashed password and role
         const newUser = new User({
@@ -88,8 +85,7 @@ router.post('/create-user', async (req, res) => {
             email,
             phone,
             company,
-
-            password: hashedPassword,
+            password: password,
             role: role || 'user', // Use provided role or default to 'user'
         });
 
@@ -101,7 +97,7 @@ router.post('/create-user', async (req, res) => {
             name: newUser.name,
             email: newUser.email,
             phone: newUser.phone,
-            generatedPass: pass,
+            generatedPass: password,
             company: newUser.company,
             role: newUser.role, // Include role in the response
         };
@@ -117,9 +113,50 @@ router.post('/create-user', async (req, res) => {
 //filter api
 router.get('/filter', async (req, res) => {
     try {
+        // Log the incoming query parameters for debugging
+        console.log('Query Parameters:', req.query);
+
         const filter = {};
         Object.keys(req.query).forEach(key => {
             if (key === 'page' || key === 'limit') return;
+
+            // Handle Product nested fields with proper MongoDB dot notation
+            if (key.includes('Product.')) {
+                // Get the nested field path
+                const fieldPath = key; // Use the full key as is (e.g., "Product.Exam")
+                const value = req.query[key];
+
+                // Log the field path and value for debugging
+                console.log(`Processing nested field: ${fieldPath} with value: ${value}`);
+
+                // Handle different data types based on the value
+                if (value === 'true' || value === 'false') {
+                    // Handle boolean values
+                    filter[fieldPath] = value === 'true';
+                    console.log(`Set boolean field ${fieldPath} to ${filter[fieldPath]}`);
+                } else if (!isNaN(value) && value.trim() !== '') {
+                    // Handle numeric values
+                    // Check if the field is productId and convert it to a number
+                    if (key === 'Product.productId') {
+                        filter[fieldPath] = Number(value);
+                        console.log(`Set numeric field ${fieldPath} to ${filter[fieldPath]}`);
+                    } else {
+                        filter[fieldPath] = Number(value);
+                        console.log(`Set numeric field ${fieldPath} to ${filter[fieldPath]}`);
+                    }
+                } else if (typeof value === 'string') {
+                    // Handle string values with case-insensitive partial matching
+                    filter[fieldPath] = { $regex: value, $options: 'i' };
+                    console.log(`Set string field ${fieldPath} to regex match: ${JSON.stringify(filter[fieldPath])}`);
+                } else {
+                    // Default case
+                    filter[fieldPath] = value;
+                    console.log(`Set field ${fieldPath} to value: ${filter[fieldPath]}`);
+                }
+                return;
+            }
+
+            // Original date filtering logic
             if (key === 'startDate') {
                 filter['tran_date'] = filter['tran_date'] || {};
                 filter['tran_date']['$gte'] = req.query.startDate;
@@ -130,12 +167,16 @@ router.get('/filter', async (req, res) => {
                 filter['tran_date']['$lte'] = req.query.endDate;
                 return;
             }
+
+            // Original validation status logic
             if (key === 'isValidated') {
                 filter['status'] = req.query.isValidated === 'true'
                     ? { $in: ['valid', 'validated'] }
                     : { $nin: ['valid', 'validated'] };
                 return;
             }
+
+            // Original handling for non-nested fields
             if (['currency_amount', 'discount_percentage', 'o2o'].includes(key) && !isNaN(req.query[key])) {
                 filter[key] = Number(req.query[key]);
             } else if (key === 'Approval' && (req.query[key] === 'true' || req.query[key] === 'false')) {
@@ -147,9 +188,26 @@ router.get('/filter', async (req, res) => {
             }
         });
 
+        // Log the final filter object for debugging
+        console.log('Final Filter Object:', JSON.stringify(filter, null, 2));
+
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
+
+        // First check if we have any documents that match the filter
+        const sampleDoc = await Transaction.findOne(filter);
+        console.log('Sample document found:', sampleDoc ? 'Yes' : 'No');
+
+        // If we don't find any documents, let's check what documents we do have with Product.Exam field
+        if (!sampleDoc && filter['Product.Exam'] !== undefined) {
+            const examDocs = await Transaction.find({ "Product.Exam": { $exists: true } }).limit(1);
+            console.log('Documents with Product.Exam field exist:', examDocs.length > 0);
+
+            if (examDocs.length > 0) {
+                console.log('Sample Product.Exam value:', examDocs[0].Product?.Exam);
+            }
+        }
 
         const transactions = await Transaction.find(filter)
             .skip(skip)
@@ -381,7 +439,7 @@ router.get('/filter', async (req, res) => {
             totalPages: Math.ceil(totalCount / limit),
             dailySales: dailySales,
             transactions: transactions,
-
+            appliedFilter: filter // Include the filter in the response for debugging
         });
     } catch (err) {
         console.error('Error filtering transactions:', err);

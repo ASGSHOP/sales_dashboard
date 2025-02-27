@@ -27,7 +27,7 @@ const userSchema = new mongoose.Schema({
         type: String,
         required: [true, 'Password is required'],
         minlength: [5, 'Password must be at least 5 characters long'],
-        select: false // Don't include password in query results by default
+        select: true // Don't include password in query results by default
     },
     company: {
         type: String,
