@@ -4,7 +4,7 @@ const User = require('../../models/User');
 const bcrypt = require('bcryptjs');
 const Transaction = require('../../models/Transaction'); // Adjust path as needed
 const { createObjectCsvStringifier } = require('csv-writer');
-const { pipeline, Transform } = require('stream');
+
 const mongoose = require('mongoose');
 /**
  * @route GET /api/transactions/filter
@@ -113,7 +113,7 @@ router.post('/create-user', async (req, res) => {
 //filter api
 router.get('/filter', async (req, res) => {
     const { startDate, endDate, page, ...rest } = req?.query
-    console.log(page);
+    let pageNumber = page || 1;
     const matchQuery = {
         Timestamp: {
             $gte: startDate,
@@ -244,7 +244,7 @@ router.get('/filter', async (req, res) => {
                     $unwind: "$tranjectionData"
                 },
                 {
-                    $skip: 10 * (page - 1), //Calculate Skip Value Write (prev)
+                    $skip: 10 * (pageNumber - 1), //Calculate Skip Value Write (prev)
                 },
                 {
                     $limit: 10 //Per page limit Value
@@ -268,6 +268,60 @@ router.get('/filter', async (req, res) => {
 });
 
 
+
+router.get('/count-students', async (req, res) => {
+    const courseName = req.query.courseName;
+
+    if (!courseName) {
+        return res.status(400).json({ error: "Course name is required" });
+    }
+
+    try {
+        // const db = await connectToDatabase();
+        const collection = Transaction;
+
+        // Aggregation pipeline
+        const pipeline = [
+            {
+                $match: {
+                    "Product.productName": courseName
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    count: { $sum: 1 },
+                    students: {
+                        $push: {
+                            name: "$Name",
+                            email: "$Email",
+                            phone: "$Phone",
+                            institution: "$Institution"
+                        }
+                    }
+                }
+            },
+            {
+                $project: {
+                    _id: 0,
+                    totalStudents: "$count",
+                    students: 1
+                }
+            }
+        ];
+
+        const result = await collection.aggregate(pipeline).toArray();
+
+        if (result.length > 0) {
+            res.json(result[0]);
+        } else {
+            res.json({ totalStudents: 0, students: [] });
+        }
+    } catch (error) {
+        console.error("Error counting students:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 
 
 
