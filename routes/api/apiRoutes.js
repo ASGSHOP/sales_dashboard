@@ -130,7 +130,7 @@ router.get('/filter', async (req, res) => {
         // Example: If key is "Product.Platform", it will be added as a nested field
         matchQuery[key] = value;
     }
-    console.log(matchQuery)
+    //  console.log(matchQuery)
 
     const response = await Transaction.aggregate([{
         $match: matchQuery
@@ -276,50 +276,54 @@ router.get('/count-students', async (req, res) => {
         return res.status(400).json({ error: "Course name is required" });
     }
 
-    try {
-        // const db = await connectToDatabase();
-        const collection = Transaction;
+    const pipeline = [
+        {
+            $match: {
+                "ProductName": courseName,
+                "status": "VALID" // Only count valid transactions
+            }
+        },
 
-        // Aggregation pipeline
-        const pipeline = [
-            {
-                $match: {
-                    "Product.productName": courseName
-                }
-            },
-            {
-                $group: {
-                    _id: null,
-                    count: { $sum: 1 },
-                    students: {
-                        $push: {
-                            name: "$Name",
-                            email: "$Email",
-                            phone: "$Phone",
-                            institution: "$Institution"
-                        }
+        {
+            $group: {
+                _id: null,
+                count: { $sum: 1 },
+
+                students: {
+                    $push: {
+                        name: "$Name",
+                        email: "$Email",
+                        phone: "$Phone",
+                        institution: "$Institution",
+                        hsc: "$HSC"
                     }
                 }
-            },
-            {
-                $project: {
-                    _id: 0,
-                    totalStudents: "$count",
-                    students: 1
-                }
             }
-        ];
+        },
+        {
+            $project: {
+                _id: 0,
+                totalStudents: "$count",
+                students: 1
+            }
+        }
+    ];
 
-        const result = await collection.aggregate(pipeline).toArray();
-
-        if (result.length > 0) {
-            res.json(result[0]);
+    try {
+        const users = await Transaction.aggregate(pipeline);
+        // console.log(users)
+        if (users.length > 0) {
+            res.json({
+                totalNumberOfStudents: users[0].totalStudents,
+                students: users[0].students
+            });
         } else {
             res.json({ totalStudents: 0, students: [] });
         }
     } catch (error) {
-        console.error("Error counting students:", error);
-        res.status(500).json({ error: "Internal server error" });
+        return res.json({
+            error: error
+        });
     }
 });
 
