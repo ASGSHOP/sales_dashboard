@@ -112,560 +112,162 @@ router.post('/create-user', async (req, res) => {
 
 //filter api
 router.get('/filter', async (req, res) => {
-    try {
-        // Build the query object dynamically from request query parameters
-        const query = {};
-
-        // Process date range filters
-        let dateQuery = {};
-        if (req.query.startDate && req.query.endDate) {
-            // Convert dates to ISO format for consistent comparison
-            const startDate = new Date(req.query.startDate);
-            const endDate = new Date(req.query.endDate);
-            endDate.setHours(23, 59, 59, 999); // Set to end of day
-
-            dateQuery = {
-                Timestamp: {
-                    $gte: startDate.toISOString().split('T')[0],
-                    $lte: endDate.toISOString().split('T')[0]
-                }
-            };
-        } else if (req.query.startDate) {
-            // If only startDate is provided, filter for that specific date
-            const startDate = new Date(req.query.startDate);
-            dateQuery = {
-                Timestamp: startDate.toISOString().split('T')[0]
-            };
+    const { startDate, endDate, page, ...rest } = req?.query
+    console.log(page);
+    const matchQuery = {
+        Timestamp: {
+            $gte: startDate,
+            $lte: endDate
         }
+    };
 
-        // Add date query to main query
-        Object.assign(query, dateQuery);
+    // Iterate over all query parameters
+    for (const [key, value] of Object.entries(rest)) {
+        // Skip startDate and endDate since they are already handled
+        if (key === 'startDate' || key === 'endDate') continue;
 
-        // Remove special filter parameters from the query object
-        const { startDate, endDate, page, limit, ...filters } = req.query;
-
-        // Process all other filters
-        Object.keys(filters).forEach(key => {
-            // Handle nested fields in Product object
-            if (key.startsWith('Product.')) {
-                const productField = key.split('Product.')[1];
-                query[`Product.${productField}`] = filters[key];
-            } else {
-                // Handle regular fields
-                // For numeric fields, convert string to number
-                if (['currency_amount', 'store_amount'].includes(key)) {
-                    query[key] = Number(filters[key]);
-                } else {
-                    // Use regex for partial string matching for string fields (case-insensitive)
-                    if (typeof filters[key] === 'string') {
-                        query[key] = { $regex: filters[key], $options: 'i' };
-                    } else {
-                        query[key] = filters[key];
-                    }
-                }
-            }
-        });
-
-        // Get sales statistics for the date range/single date
-        // We'll get this before applying pagination
-        const salesStats = await Transaction.aggregate([
-            { $match: { ...query, status: "VALID" } }, // Only count valid transactions
-            {
-                $group: {
-                    _id: null,
-                    totalSalesCount: { $sum: 1 },
-                    totalSalesAmount: { $sum: "$currency_amount" } // Using currency_amount instead of store_amount
-                }
-            }
-        ]).exec();
-
-        const salesData = salesStats.length > 0 ? {
-            totalSalesCount: salesStats[0].totalSalesCount,
-            totalSalesAmount: salesStats[0].totalSalesAmount
-        } : {
-            totalSalesCount: 0,
-            totalSalesAmount: 0
-        };
-
-        // Pagination
-        const pageNum = parseInt(page) || 1;
-        const pageSize = parseInt(limit) || 10;
-        const skip = (pageNum - 1) * pageSize;
-
-        // Execute query with pagination
-        const transactions = await Transaction.find(query)
-            .skip(skip)
-            .limit(pageSize)
-            .exec();
-
-        // Get total count for pagination info
-        const total = await Transaction.countDocuments(query);
-
-        // Get date information for the response
-        let dateInfo = {};
-        if (req.query.startDate && req.query.endDate) {
-            dateInfo = {
-                dateRange: true,
-                startDate: req.query.startDate,
-                endDate: req.query.endDate
-            };
-        } else if (req.query.startDate) {
-            dateInfo = {
-                dateRange: false,
-                date: req.query.startDate
-            };
-        }
-
-        return res.status(200).json({
-            success: true,
-            count: transactions.length,
-            total,
-            page: pageNum,
-            totalPages: Math.ceil(total / pageSize),
-            dateInfo,
-            salesData,
-            data: transactions
-        });
-
-    } catch (error) {
-        console.error('Error filtering transactions:', error);
-        return res.status(500).json({
-            success: false,
-            error: 'Server Error',
-            message: error.message
-        });
+        // Dynamically add conditions to the matchQuery
+        // Example: If key is "Product.Platform", it will be added as a nested field
+        matchQuery[key] = value;
     }
-});
+    console.log(matchQuery)
 
-// Add a dedicated endpoint just for sales statistics
-router.get('/sales/stats', async (req, res) => {
-    try {
-        const { date, startDate, endDate, ...queryFilters } = req.query;
+    const response = await Transaction.aggregate([{
+        $match: matchQuery
+    },
 
-        // Validate date parameters
-        if (date && (startDate || endDate)) {
-            return res.status(400).json({ error: "Provide either single date or date range, not both" });
-        }
-
-        if (!date && (!startDate || !endDate)) {
-            return res.status(400).json({ error: "Must provide either a date or both start and end dates" });
-        }
-
-        // Build date filter for tran_date
-        const dateFilter = {};
-        if (date) {
-            dateFilter.tran_date = { $regex: new RegExp(`^${date}`) };
-        } else {
-            dateFilter.tran_date = {
-                $gte: new Date(startDate),
-                $lte: new Date(endDate + 'T23:59:59.999Z')
-            };
-        }
-
-        // Convert query parameters to MongoDB filters
-        const filters = {};
-        for (const [key, value] of Object.entries(queryFilters)) {
-            if (value === 'true') filters[key] = true;
-            else if (value === 'false') filters[key] = false;
-            else if (!isNaN(value)) filters[key] = parseFloat(value);
-            else filters[key] = value;
-        }
-
-        // Aggregation pipeline
-        const pipeline = [
-            { $match: { ...filters, ...dateFilter } },
-            {
-                $addFields: {
-                    saleDate: {
-                        $dateToString: {
-                            format: "%Y-%m-%d",
-                            date: { $toDate: "$tran_date" }
-                        }
-                    }
-                }
-            },
-            {
-                $facet: {
-                    dailyStats: [
-                        {
-                            $group: {
-                                _id: "$saleDate",
-                                count: { $sum: 1 },
-                                totalAmount: { $sum: "$currency_amount" }
-                            }
-                        },
-                        { $sort: { _id: 1 } }
-                    ],
-                    totalStats: [
-                        {
-                            $group: {
-                                _id: null,
-                                totalCount: { $sum: 1 },
-                                totalAmount: { $sum: "$currency_amount" }
-                            }
-                        }
-                    ]
-                }
-            },
-            {
-                $project: {
-                    dailyStats: 1,
-                    totalStats: {
-                        $ifNull: [
-                            { $arrayElemAt: ["$totalStats", 0] },
-                            { totalCount: 0, totalAmount: 0 }
-                        ]
-                    }
-                }
-            }
-        ];
-
-        const result = await Transaction.aggregate(pipeline);
-        const stats = result[0] || { dailyStats: [], totalStats: { totalCount: 0, totalAmount: 0 } };
-
-        // Format response
-        const response = {
-            dailyStats: stats.dailyStats.map(day => ({
-                date: day._id,
-                count: day.count,
-                totalAmount: day.totalAmount
-            })),
-            totalCount: stats.totalStats.totalCount,
-            totalAmount: stats.totalStats.totalAmount
-        };
-
-        res.json(response);
-
-    } catch (error) {
-        console.error("Error fetching sales stats:", error);
-        res.status(500).json({ error: "Internal server error" });
-    }
-});
-
-// Utility function to parse dates and convert to consistent format
-function parseDate(dateString) {
-    // Check if dateString is already in YYYY-MM-DD format
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-        return dateString;
-    }
-
-    // Create a date object and format it as YYYY-MM-DD
-    const date = new Date(dateString);
-    return date.toISOString().split('T')[0];
-}
-
-
-router.get('/sales', async (req, res) => {
-    try {
-        // Extract pagination parameters
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
-
-        // Extract date filters
-        const { startDate, endDate } = req.query;
-
-        // Build the query
-        const query = {};
-
-        // Handle date filtering
-        if (startDate) {
-            const formattedStartDate = parseDate(startDate);
-
-            if (endDate) {
-                // Date range query
-                const formattedEndDate = parseDate(endDate);
-                query.Timestamp = {
-                    $gte: formattedStartDate,
-                    $lte: formattedEndDate
-                };
-            } else {
-                // Single date query
-                query.Timestamp = formattedStartDate;
-            }
-        }
-
-        // Handle other filter parameters (dynamically)
-        Object.keys(req.query).forEach(key => {
-            // Skip pagination and date range parameters
-            if (['page', 'limit', 'startDate', 'endDate', 'sort', 'sortOrder'].includes(key)) {
-                return;
-            }
-
-            // Handle nested properties (using dot notation)
-            if (key.includes('.')) {
-                const value = req.query[key];
-                query[key] = value;
-                return;
-            }
-
-            // Handle regular properties
-            if (req.query[key]) {
-                // Try to parse as JSON for complex filters
-                try {
-                    query[key] = JSON.parse(req.query[key]);
-                } catch (e) {
-                    // If not valid JSON, use as is
-                    query[key] = req.query[key];
-                }
-            }
-        });
-
-        // Sort parameters
-        const sortField = req.query.sort || 'Timestamp';
-        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
-        const sortOptions = { [sortField]: sortOrder };
-
-        // Execute main query with pagination
-        const sales = await Transaction.find(query)
-            .sort(sortOptions)
-            .skip(skip)
-            .limit(limit);
-
-        // Get total count for pagination and summary
-        const totalRecords = await Transaction.countDocuments(query);
-
-        // Calculate total sales amount based on currency_amount (excluding store_amount)
-        const totalSalesAmount = sales.reduce((sum, record) => {
-            return sum + (record.currency_amount || 0);
-        }, 0);
-
-        // Get the total sale count for all matching records (not just the current page)
-        const totalSaleCount = await Transaction.countDocuments({
-            ...query,
-            status: "VALID" // Only count valid sales
-        });
-
-        // Aggregate sales data by day
-        let dailyMetrics = [];
-
-        if (startDate) {
-            // Prepare date query for aggregation
-            const dateQuery = {};
-            if (startDate) {
-                dateQuery.$gte = parseDate(startDate);
-                if (endDate) {
-                    dateQuery.$lte = parseDate(endDate);
-                }
-            }
-
-            // MongoDB aggregation for daily metrics
-            dailyMetrics = await Transaction.aggregate([
+    {
+        $facet: {
+            totalData: [
                 {
-                    $match: {
-                        ...query,
-                        // Make sure we're filtering by date correctly
-                        Timestamp: dateQuery
+                    $group: {
+                        _id: null,
+                        totalAmount: { $sum: "$currency_amount" },
+                        totalCount: { $sum: 1 },
                     }
+                },
+            ],
+            barChartData: [
+                {
+                    $group: {
+                        _id: { $substr: ["$Timestamp", 0, 10] },
+                        totalAmount: { $sum: "$currency_amount" },
+                        totalCount: { $sum: 1 },
+                    },
+                },
+                {
+                    $sort: { _id: 1 }
+                }
+            ],
+            pichart: [
+                {
+                    $group: {
+                        _id: { $substr: ["$Timestamp", 0, 10] },
+                        productName: { $first: "$Product.productName" },
+                        productId: { $first: "$Product.productId" },
+                        amount: { $sum: "$currency_amount" },
+                        count: { $sum: 1 }
+                    },
+                },
+                {
+                    $sort: {
+                        amount: -1
+                    }
+                },
+                {
+                    $limit: 2
+                },
+            ],
+            other: [
+                {
+                    $group: {
+                        _id: { $substr: ["$Timestamp", 0, 10] },
+                        productName: { $first: "$Product.productName" },
+                        productId: { $first: "$Product.productId" },
+                        amount: { $sum: "$currency_amount" },
+                        count: { $sum: 1 }
+                    }
+                },
+                {
+                    $sort: { amount: -1 }
+                },
+                {
+                    $skip: 2
                 },
                 {
                     $group: {
-                        _id: {
-                            // Group by date part of Timestamp
-                            date: { $substr: ["$Timestamp", 0, 10] }
-                        },
-                        count: { $sum: 1 },
-                        validSaleCount: {
-                            $sum: {
-                                $cond: [{ $eq: ["$status", "VALID"] }, 1, 0]
-                            }
-                        },
-                        totalAmount: { $sum: "$currency_amount" },
-                        transactions: {
-                            $push: {
+                        _id: null,
+                        productName: { $first: "$other.productName" },
+                        productId: { $first: "$Product.productId" },
+                        amount: { $sum: "$amount" },
+                        count: { $sum: "$count" }
+                    }
+                },
+                {
+                    $project: {
+                        _id: { $literal: "otherDatas" },
+                        productName: { $literal: "Other" },
+                        productId: { $literal: "N/A" },
+                        amount: 1,
+                        count: 1
+                    }
+                }
+            ],
+            tranjection: [
+                {
+                    $group: {
+                        _id: null,
+                        totalTranjectionAmount: { $sum: "$currency_amount" },
+                        totalTranjectionCount: { $sum: 1 },
+                        tranjectionData: {
+                            $push:
+                            {
                                 tran_id: "$tran_id",
                                 amount: "$currency_amount",
-                                product: "$ProductName",
-                                customer: "$Name",
-                                timestamp: "$Timestamp",
-                                status: "$status"
+                                productName: "$Product.productName",
+                                productId: "$Product.productId",
+                                cycle: "$Product.Cycle",
+                                platform: "$Product.Platform",
+                                email: "$Email",
+                                name: "$Name",
+                                phone: "$Phone",
+                                type: "$gw",
+                                date: "$Timestamp",
+                                discountAmount: "$discount_amount",
+                                storeAmount: "$store_amount",
+                                coupon: "$Coupon"
                             }
                         }
                     }
                 },
-                { $sort: { "_id.date": 1 } }
-            ]);
+                {
+                    $unwind: "$tranjectionData"
+                },
+                {
+                    $skip: 10 * (page - 1), //Calculate Skip Value Write (prev)
+                },
+                {
+                    $limit: 10 //Per page limit Value
+                }
+            ]
         }
-
-        // Prepare response
-        const response = {
-            pagination: {
-                currentPage: page,
-                totalPages: Math.ceil(totalRecords / limit),
-                totalRecords,
-                recordsPerPage: limit
-            },
-            summary: {
-                totalSalesAmount,
-                totalSaleCount, // Total number of valid sales
-                recordCount: sales.length, // Records on current page
-                currency: "BDT" // Assuming BDT is the currency
-            },
-            dailyMetrics: dailyMetrics.map(day => ({
-                date: day._id.date,
-                transactionCount: day.count, // Total transactions
-                saleCount: day.validSaleCount, // Valid sales only
-                totalAmount: day.totalAmount,
-                //transactions: day.transactions.slice(0, 5) // Limit to first 5 transactions to keep response size manageable
-            })),
-            records: sales
-        };
-
-        res.status(200).json(response);
-    } catch (error) {
-        console.error('Error fetching sales data:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching sales data',
-            error: error.message
-        });
+    },
+    {
+        $project: {
+            piChart: { $concatArrays: ["$pichart", "$other"] },
+            totalAmount: { $arrayElemAt: ["$totalData.totalAmount", 0] },
+            totalCount: { $arrayElemAt: ["$totalData.totalCount", 0] },
+            barChartData: 1,
+            tranjection: 1,
+        }
     }
+
+    ])
+    // console.log(response);
+    return res.status(200).send(response);
 });
 
 
-
-
-
-// Get combined top products data (both by amount and count)
-router.get('/top-products', async (req, res) => {
-    try {
-        // Build date query
-        let dateQuery = {};
-
-        if (req.query.startDate && req.query.endDate) {
-            const startDate = new Date(req.query.startDate);
-            const endDate = new Date(req.query.endDate);
-            endDate.setHours(23, 59, 59, 999);
-
-            dateQuery = {
-                Timestamp: {
-                    $gte: startDate.toISOString().split('T')[0],
-                    $lte: endDate.toISOString().split('T')[0]
-                }
-            };
-        } else if (req.query.startDate) {
-            const startDate = new Date(req.query.startDate);
-            dateQuery = {
-                Timestamp: startDate.toISOString().split('T')[0]
-            };
-        }
-
-        // Add status filter for valid transactions
-        const query = { ...dateQuery, status: "VALID" };
-
-        // Get all product sales data
-        const productSales = await Transaction.aggregate([
-            { $match: query },
-            {
-                $group: {
-                    _id: "$ProductName",
-                    salesCount: { $sum: 1 },
-                    salesAmount: { $sum: "$currency_amount" }
-                }
-            }
-        ]).exec();
-
-        // Sort by amount and count
-        const byAmount = [...productSales].sort((a, b) => b.salesAmount - a.salesAmount);
-        const byCount = [...productSales].sort((a, b) => b.salesCount - a.salesCount);
-
-        // Calculate overall totals
-        const overallTotal = {
-            salesCount: productSales.reduce((sum, product) => sum + product.salesCount, 0),
-            salesAmount: productSales.reduce((sum, product) => sum + product.salesAmount, 0)
-        };
-
-        // Get date information for the response
-        let dateInfo = {};
-        if (req.query.startDate && req.query.endDate) {
-            dateInfo = {
-                dateRange: true,
-                startDate: req.query.startDate,
-                endDate: req.query.endDate
-            };
-        } else if (req.query.startDate) {
-            dateInfo = {
-                dateRange: false,
-                date: req.query.startDate
-            };
-        }
-
-        // Format data specifically for charts
-        const chartData = {
-            // For pie/donut charts showing sales distribution by amount
-            pieChartAmount: byAmount.slice(0, 5).map(product => ({
-                name: product._id,
-                value: product.salesAmount,
-                percentage: ((product.salesAmount / overallTotal.salesAmount) * 100).toFixed(2)
-            })),
-
-            // For pie/donut charts showing sales distribution by count
-            pieChartCount: byCount.slice(0, 5).map(product => ({
-                name: product._id,
-                value: product.salesCount,
-                percentage: ((product.salesCount / overallTotal.salesCount) * 100).toFixed(2)
-            })),
-
-            // For bar charts comparing top products
-            barChart: byAmount.slice(0, 10).map(product => ({
-                name: product._id,
-                amount: product.salesAmount,
-                count: product.salesCount
-            })),
-
-            // For data tables with complete information
-            tableData: productSales.map(product => ({
-                productName: product._id,
-                salesCount: product.salesCount,
-                salesAmount: product.salesAmount,
-                percentageByAmount: ((product.salesAmount / overallTotal.salesAmount) * 100).toFixed(2),
-                percentageByCount: ((product.salesCount / overallTotal.salesCount) * 100).toFixed(2)
-            }))
-        };
-
-        return res.status(200).json({
-            success: true,
-            dateInfo,
-            overallTotal,
-            chartData,
-            // Preserve original data structure for backward compatibility
-            byAmount: {
-                top3Products: byAmount.slice(0, 3).map(product => ({
-                    productName: product._id,
-                    salesCount: product.salesCount,
-                    salesAmount: product.salesAmount,
-                    percentageOfTotal: ((product.salesAmount / overallTotal.salesAmount) * 100).toFixed(2)
-                })),
-                otherProducts: {
-                    count: byAmount.length - 3,
-                    salesAmount: byAmount.slice(3).reduce((sum, product) => sum + product.salesAmount, 0),
-                    percentageOfTotal: ((byAmount.slice(3).reduce((sum, product) => sum + product.salesAmount, 0) / overallTotal.salesAmount) * 100).toFixed(2)
-                }
-            },
-            byCount: {
-                top3Products: byCount.slice(0, 3).map(product => ({
-                    productName: product._id,
-                    salesCount: product.salesCount,
-                    salesAmount: product.salesAmount,
-                    percentageOfTotal: ((product.salesCount / overallTotal.salesCount) * 100).toFixed(2)
-                })),
-                otherProducts: {
-                    count: byCount.length - 3,
-                    salesCount: byCount.slice(3).reduce((sum, product) => sum + product.salesCount, 0),
-                    percentageOfTotal: ((byCount.slice(3).reduce((sum, product) => sum + product.salesCount, 0) / overallTotal.salesCount) * 100).toFixed(2)
-                }
-            }
-        });
-
-    } catch (error) {
-        console.error('Error getting top products:', error);
-        return res.status(500).json({
-            success: false,
-            error: 'Server Error',
-            message: error.message
-        });
-    }
-});
 
 
 
